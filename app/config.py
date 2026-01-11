@@ -1,30 +1,25 @@
 from pydantic_settings import BaseSettings
-
+from typing import Optional
 
 
 class Settings(BaseSettings):
+    # App
     app_env: str = "production"
-    app_name: str = "myvault"
 
-    supabase_url: str
-    supabase_anon_key: str
-    supabase_service_key: str
+    # Supabase
+    SUPABASE_URL: Optional[str] = None
+    SUPABASE_ANON_KEY: Optional[str] = None
+    SUPABASE_SERVICE_KEY: Optional[str] = None
 
-    aws_access_key_id: str
-    aws_secret_access_key: str
-    aws_region: str = "ap-south-1"
-    s3_bucket_name: str
-
-    twilio_account_sid: str
-    twilio_auth_token: str
-    twilio_whatsapp_number: str
-
-    reducto_api_key: str
-    anthropic_api_key: str
+    # AWS (optional for now)
+    AWS_ACCESS_KEY_ID: Optional[str] = None
+    AWS_SECRET_ACCESS_KEY: Optional[str] = None
+    AWS_REGION: Optional[str] = "ap-south-1"
+    S3_BUCKET_NAME: Optional[str] = None
 
     class Config:
         env_file = ".env"
+        case_sensitive = True
 
 
 settings = Settings()
-
