@@ -19,3 +19,8 @@ twilio==9.0.4
 
 # Reducto (if SDK used)
 reductoai==0.7.0
+
+
+# REQUIRED for Twilio / request.form()
+python-multipart==0.0.9
+
