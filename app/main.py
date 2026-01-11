@@ -1,34 +1,27 @@
-import os
-import uuid
-import requests
-from datetime import datetime
-
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
-
-from supabase import create_client
-import boto3
 from twilio.twiml.messaging_response import MessagingResponse
+import os
+import boto3
+import requests
+from supabase import create_client
+import uuid
+import logging
 
-# --------------------
+app = FastAPI()
+logging.basicConfig(level=logging.INFO)
+
 # ENV
-# --------------------
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 
-TWILIO_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+AWS_ACCESS_KEY_ID = os.environ["AWS_ACCESS_KEY_ID"]
+AWS_SECRET_ACCESS_KEY = os.environ["AWS_SECRET_ACCESS_KEY"]
+AWS_REGION = os.environ["AWS_REGION"]
+S3_BUCKET_NAME = os.environ["S3_BUCKET_NAME"]
 
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-AWS_REGION = os.getenv("AWS_REGION")
-S3_BUCKET = os.getenv("S3_BUCKET_NAME")
+REDUCTO_API_KEY = os.environ.get("REDUCTO_API_KEY")
 
-REDUCTO_API_KEY = os.getenv("REDUCTO_API_KEY")
-
-# --------------------
-# CLIENTS
-# --------------------
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 s3 = boto3.client(
@@ -38,145 +31,104 @@ s3 = boto3.client(
     region_name=AWS_REGION,
 )
 
-app = FastAPI()
-
-# --------------------
-# HELPERS
-# --------------------
-def get_or_create_vault(phone: str):
-    res = supabase.table("vaults").select("*").eq("phone_number", phone).execute()
-    if res.data:
-        return res.data[0]
-
-    vault = {
-        "vault_id": str(uuid.uuid4()),
-        "phone_number": phone,
-        "created_at": datetime.utcnow().isoformat(),
-    }
-    supabase.table("vaults").insert(vault).execute()
-    return vault
-
-
-def download_twilio_media(url: str):
-    r = requests.get(url, auth=(TWILIO_SID, TWILIO_TOKEN))
-    r.raise_for_status()
-    return r.content
-
-
-def upload_to_s3(vault_id: str, artifact_id: str, filename: str, content: bytes):
-    key = f"vaults/{vault_id}/raw/{artifact_id}/{filename}"
-    s3.put_object(
-        Bucket=S3_BUCKET,
-        Key=key,
-        Body=content,
-        ContentType="application/octet-stream",
-    )
-    return key
-
-
-def call_reducto(presigned_url: str):
-    headers = {
-        "Authorization": f"Bearer {REDUCTO_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {"input": presigned_url}
-    r = requests.post(
-        "https://platform.reducto.ai/parse",
-        headers=headers,
-        json=payload,
-        timeout=60,
-    )
-    r.raise_for_status()
-    return r.json()
-
-
-# --------------------
-# WEBHOOK
-# --------------------
 @app.post("/webhooks/whatsapp")
 async def whatsapp_webhook(request: Request):
     form = await request.form()
-    resp = MessagingResponse()
-
-    from_number = form.get("From")  # whatsapp:+91...
-    phone = from_number.replace("whatsapp:", "")
-
-    vault = get_or_create_vault(phone)
-
+    phone = form.get("From", "").replace("whatsapp:", "")
+    body = form.get("Body", "").strip()
     num_media = int(form.get("NumMedia", 0))
 
-    # ---------------- TEXT ONLY ----------------
-    if num_media == 0:
-        resp.message(
-            "👋 Hey! MyVault is live.\n\n"
-            "Send me any document (PDF / image) and I’ll store it safely."
-        )
-        return Response(str(resp), media_type="application/xml")
+    resp = MessagingResponse()
 
-    # ---------------- MEDIA INGESTION ----------------
-    media_url = form.get("MediaUrl0")
-    content_type = form.get("MediaContentType0", "")
-    filename = f"upload_{datetime.utcnow().timestamp()}"
+    # --- SAFETY: no phone, no processing
+    if not phone:
+        resp.message("Something went wrong. Please retry.")
+        return Response(content=str(resp), media_type="application/xml")
 
-    if "pdf" in content_type:
-        filename += ".pdf"
-    elif "image" in content_type:
-        filename += ".jpg"
-
-    artifact_id = str(uuid.uuid4())
-
-    # 1. Download file
-    file_bytes = download_twilio_media(media_url)
-
-    # 2. Upload raw to S3
-    s3_key = upload_to_s3(vault["vault_id"], artifact_id, filename, file_bytes)
-
-    # 3. Register artifact
-    artifact = {
-        "artifact_id": artifact_id,
-        "vault_id": vault["vault_id"],
-        "s3_bucket": S3_BUCKET,
-        "s3_key": s3_key,
-        "file_name": filename,
-        "file_type": content_type,
-        "file_size_bytes": len(file_bytes),
-        "uploaded_at": datetime.utcnow().isoformat(),
-        "uploaded_via": "whatsapp",
-    }
-    supabase.table("artifacts").insert(artifact).execute()
-
-    # 4. Presigned URL
-    presigned = s3.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": S3_BUCKET, "Key": s3_key},
-        ExpiresIn=3600,
+    # --- FETCH OR CREATE VAULT (STRICT 1:1)
+    vault = (
+        supabase.table("vaults")
+        .select("*")
+        .eq("phone_number", phone)
+        .execute()
+        .data
     )
 
-    # 5. Send to Reducto
-    reducto_result = call_reducto(presigned)
+    if not vault:
+        vault = (
+            supabase.table("vaults")
+            .insert({"phone_number": phone})
+            .execute()
+            .data
+        )
 
-    job = {
-        "job_id": str(uuid.uuid4()),
-        "artifact_id": artifact_id,
-        "status": "completed",
-        "raw_response": reducto_result,
-        "created_at": datetime.utcnow().isoformat(),
-    }
-    supabase.table("processing_jobs").insert(job).execute()
+    vault_id = vault[0]["vault_id"]
 
-    # 6. Store chunks
-    chunks = reducto_result.get("result", {}).get("chunks", [])
-    for idx, chunk in enumerate(chunks):
-        supabase.table("structured_chunks").insert(
-            {
-                "chunk_id": str(uuid.uuid4()),
-                "artifact_id": artifact_id,
-                "job_id": job["job_id"],
-                "chunk_index": idx,
-                "content": chunk.get("content", ""),
-                "blocks": chunk.get("blocks", {}),
-            }
-        ).execute()
+    # --- TEXT ONLY
+    if num_media == 0:
+        if body.lower() in ["hi", "hello", "hey"]:
+            resp.message("Hey 👋 Send me any document. I’ll store it safely.")
+        else:
+            resp.message("Send a document (PDF / image) to store it.")
+        return Response(content=str(resp), media_type="application/xml")
 
-    resp.message("📄 Document saved. Processing & indexing started.")
-    return Response(str(resp), media_type="application/xml")
+    # --- MEDIA HANDLING (SAFE)
+    media_url = form.get("MediaUrl0")
+    content_type = form.get("MediaContentType0", "application/octet-stream")
+
+    if not media_url:
+        resp.message("I couldn't read that file. Please resend.")
+        return Response(content=str(resp), media_type="application/xml")
+
+    try:
+        file_ext = content_type.split("/")[-1]
+        file_id = str(uuid.uuid4())
+        s3_key = f"{vault_id}/{file_id}.{file_ext}"
+
+        # Download from Twilio
+        file_bytes = requests.get(media_url).content
+
+        # Upload raw to S3
+        s3.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=s3_key,
+            Body=file_bytes,
+            ContentType=content_type,
+        )
+
+        # Store artifact
+        artifact = (
+            supabase.table("artifacts")
+            .insert(
+                {
+                    "vault_id": vault_id,
+                    "s3_bucket": S3_BUCKET_NAME,
+                    "s3_key": s3_key,
+                    "file_type": file_ext,
+                    "file_size_bytes": len(file_bytes),
+                    "uploaded_via": "whatsapp",
+                }
+            )
+            .execute()
+            .data
+        )
+
+        # Fire Reducto async (no blocking)
+        if REDUCTO_API_KEY:
+            try:
+                requests.post(
+                    "https://api.reducto.ai/parse",
+                    headers={"Authorization": f"Bearer {REDUCTO_API_KEY}"},
+                    json={"input": f"s3://{S3_BUCKET_NAME}/{s3_key}"},
+                    timeout=2,
+                )
+            except Exception as e:
+                logging.warning(f"Reducto async failed: {e}")
+
+        resp.message("📄 Document saved. Processing & indexing started.")
+
+    except Exception as e:
+        logging.exception("MEDIA FLOW FAILED")
+        resp.message("Upload failed. Please resend the document.")
+
+    return Response(content=str(resp), media_type="application/xml")
