@@ -6,9 +6,8 @@ python-multipart==0.0.9
 # Twilio WhatsApp
 twilio==9.0.3
 
-# Supabase (httpx compatible)
+# Supabase (DO NOT OVERRIDE httpx)
 supabase==2.3.4
-httpx>=0.24,<0.26
 
 # AWS S3
 boto3==1.34.34
@@ -16,7 +15,7 @@ boto3==1.34.34
 # HTTP utilities
 requests==2.31.0
 
-# Reducto SDK (VALID VERSION)
+# Reducto SDK (VALID)
 reductoai==0.16.0
 
 # Env helpers
