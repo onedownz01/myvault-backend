@@ -1,12 +1,10 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 from twilio.twiml.messaging_response import MessagingResponse
-import os
-import boto3
+import os, uuid, logging
 import requests
+import boto3
 from supabase import create_client
-import uuid
-import logging
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -35,60 +33,44 @@ s3 = boto3.client(
 async def whatsapp_webhook(request: Request):
     form = await request.form()
     phone = form.get("From", "").replace("whatsapp:", "")
-    body = form.get("Body", "").strip()
+    body = (form.get("Body") or "").strip()
     num_media = int(form.get("NumMedia", 0))
 
     resp = MessagingResponse()
 
-    # --- SAFETY: no phone, no processing
     if not phone:
-        resp.message("Something went wrong. Please retry.")
-        return Response(content=str(resp), media_type="application/xml")
+        resp.message("Error. Please retry.")
+        return Response(str(resp), media_type="application/xml")
 
-    # --- FETCH OR CREATE VAULT (STRICT 1:1)
-    vault = (
-        supabase.table("vaults")
-        .select("*")
-        .eq("phone_number", phone)
-        .execute()
-        .data
-    )
-
+    # 1️⃣ Vault = phone number (strict)
+    vault = supabase.table("vaults").select("*").eq("phone_number", phone).execute().data
     if not vault:
-        vault = (
-            supabase.table("vaults")
-            .insert({"phone_number": phone})
-            .execute()
-            .data
-        )
-
+        vault = supabase.table("vaults").insert({"phone_number": phone}).execute().data
     vault_id = vault[0]["vault_id"]
 
-    # --- TEXT ONLY
+    # 2️⃣ Text-only
     if num_media == 0:
         if body.lower() in ["hi", "hello", "hey"]:
-            resp.message("Hey 👋 Send me any document. I’ll store it safely.")
+            resp.message("Hey 👋 Send me a document to store it safely.")
         else:
-            resp.message("Send a document (PDF / image) to store it.")
-        return Response(content=str(resp), media_type="application/xml")
+            resp.message("Please send a PDF or image document.")
+        return Response(str(resp), media_type="application/xml")
 
-    # --- MEDIA HANDLING (SAFE)
+    # 3️⃣ Media-safe handling
     media_url = form.get("MediaUrl0")
     content_type = form.get("MediaContentType0", "application/octet-stream")
 
     if not media_url:
-        resp.message("I couldn't read that file. Please resend.")
-        return Response(content=str(resp), media_type="application/xml")
+        resp.message("Couldn't read the file. Please resend.")
+        return Response(str(resp), media_type="application/xml")
 
     try:
         file_ext = content_type.split("/")[-1]
         file_id = str(uuid.uuid4())
         s3_key = f"{vault_id}/{file_id}.{file_ext}"
 
-        # Download from Twilio
-        file_bytes = requests.get(media_url).content
+        file_bytes = requests.get(media_url, timeout=10).content
 
-        # Upload raw to S3
         s3.put_object(
             Bucket=S3_BUCKET_NAME,
             Key=s3_key,
@@ -96,24 +78,16 @@ async def whatsapp_webhook(request: Request):
             ContentType=content_type,
         )
 
-        # Store artifact
-        artifact = (
-            supabase.table("artifacts")
-            .insert(
-                {
-                    "vault_id": vault_id,
-                    "s3_bucket": S3_BUCKET_NAME,
-                    "s3_key": s3_key,
-                    "file_type": file_ext,
-                    "file_size_bytes": len(file_bytes),
-                    "uploaded_via": "whatsapp",
-                }
-            )
-            .execute()
-            .data
-        )
+        supabase.table("artifacts").insert({
+            "vault_id": vault_id,
+            "s3_bucket": S3_BUCKET_NAME,
+            "s3_key": s3_key,
+            "file_type": file_ext,
+            "file_size_bytes": len(file_bytes),
+            "uploaded_via": "whatsapp",
+        }).execute()
 
-        # Fire Reducto async (no blocking)
+        # Fire-and-forget Reducto
         if REDUCTO_API_KEY:
             try:
                 requests.post(
@@ -122,13 +96,13 @@ async def whatsapp_webhook(request: Request):
                     json={"input": f"s3://{S3_BUCKET_NAME}/{s3_key}"},
                     timeout=2,
                 )
-            except Exception as e:
-                logging.warning(f"Reducto async failed: {e}")
+            except Exception:
+                pass
 
-        resp.message("📄 Document saved. Processing & indexing started.")
+        resp.message("📄 Document saved. Processing started.")
 
     except Exception as e:
-        logging.exception("MEDIA FLOW FAILED")
-        resp.message("Upload failed. Please resend the document.")
+        logging.exception("MEDIA FAILURE")
+        resp.message("Upload failed. Please try again.")
 
-    return Response(content=str(resp), media_type="application/xml")
+    return Response(str(resp), media_type="application/xml")
