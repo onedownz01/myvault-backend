@@ -1,5 +1,9 @@
 from fastapi import FastAPI
-from app.storage.s3 import s3_health_check
+from app.webhooks.twilio import router as twilio_router
+
+app = FastAPI()
+
+app.include_router(twilio_router)
 
 app = FastAPI(
     title="MyVault Backend",
