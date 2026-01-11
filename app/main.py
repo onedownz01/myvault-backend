@@ -6,16 +6,23 @@ import uuid
 
 app = FastAPI()
 
-@app.post("/webhooks/twilio")
-async def twilio_webhook(request: Request):
+
+@app.get("/")
+async def health():
+    return {"status": "ok"}
+
+
+# ✅ THIS MUST MATCH TWILIO EXACTLY
+@app.post("/webhooks/whatsapp")
+async def whatsapp_webhook(request: Request):
     form = await request.form()
     resp = MessagingResponse()
 
     from_number = form.get("From")
-    body = form.get("Body")
+    body = form.get("Body", "").strip()
     num_media = int(form.get("NumMedia", 0))
 
-    # TEXT MESSAGE
+    # ---- TEXT MESSAGE ----
     if num_media == 0 and body:
         resp.message(
             "👋 Hey! MyVault is live.\n\n"
@@ -23,29 +30,32 @@ async def twilio_webhook(request: Request):
         )
         return str(resp)
 
-    # MEDIA MESSAGE
+    # ---- MEDIA MESSAGE ----
     if num_media > 0:
         media_url = form.get("MediaUrl0")
         media_type = form.get("MediaContentType0")
 
         file_id = str(uuid.uuid4())
-        local_path = f"/tmp/{file_id}"
+        tmp_path = f"/tmp/{file_id}"
 
         r = requests.get(
             media_url,
-            auth=(os.environ["TWILIO_ACCOUNT_SID"], os.environ["TWILIO_AUTH_TOKEN"])
+            auth=(
+                os.environ["TWILIO_ACCOUNT_SID"],
+                os.environ["TWILIO_AUTH_TOKEN"],
+            ),
         )
+        r.raise_for_status()
 
-        with open(local_path, "wb") as f:
+        with open(tmp_path, "wb") as f:
             f.write(r.content)
 
-        # RAW STORAGE DONE HERE (S3 later)
+        # v0 behaviour: RAW storage only (S3 next)
         resp.message(
             "📄 Document received.\n\n"
             "Stored securely. Processing will begin shortly."
         )
-
         return str(resp)
 
-    resp.message("Something went wrong.")
+    resp.message("⚠️ Could not process your message.")
     return str(resp)
