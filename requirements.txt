@@ -1,26 +1,23 @@
+# Core API
 fastapi==0.110.0
-uvicorn[standard]==0.27.1
-pydantic==2.6.1
-pydantic-settings==2.2.1
-python-dotenv==1.0.1
-
-# HTTP
-requests==2.31.0
-
-# Supabase
-supabase==2.3.4
-asyncpg==0.29.0
-
-# AWS
-boto3==1.34.34
-
-# Twilio
-twilio==9.0.4
-
-# Reducto (if SDK used)
-reductoai==0.7.0
-
-
-# REQUIRED for Twilio / request.form()
+uvicorn==0.27.1
 python-multipart==0.0.9
 
+# Twilio WhatsApp
+twilio==9.0.3
+
+# Supabase (STRICT httpx compatibility)
+supabase==2.3.4
+httpx>=0.24,<0.26
+
+# AWS S3
+boto3==1.34.34
+
+# HTTP utils
+requests==2.31.0
+
+# Reducto SDK
+reductoai==0.6.3
+
+# Misc safety
+python-dotenv==1.0.1
